@@ -573,7 +573,7 @@ class SetOptions(Operation):
             raise Exception('invalid signer type.')
 
         signer_addr_has_valid_len = (
-            self.signer_address is not None and len(self.signer_address) != 32)
+            self.signer_address is not None and len(self.signer_address) == 32)
 
         if (self.signer_type in ('hashX', 'preAuthTx')
                 and not signer_addr_has_valid_len):
@@ -682,7 +682,7 @@ class SetOptions(Operation):
             'high_threshold': high_threshold,
             'home_domain': home_domain,
             'signer_address': signer_address,
-            'Signer_type': signer_type,
+            'signer_type': signer_type,
             'signer_weight': signer_weight
         })
 
