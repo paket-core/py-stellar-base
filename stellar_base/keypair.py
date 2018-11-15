@@ -5,15 +5,24 @@ import warnings
 
 from .base58 import b58decode_check, b58encode_check
 from .stellarxdr import Xdr
-from .utils import decode_check, encode_check, StellarMnemonic
-from .exceptions import XdrLengthError
+from .utils import encode_check, StellarMnemonic, \
+    is_valid_address, is_valid_secret_key
+from .exceptions import MissingSigningKeyError, BadSignatureError, NotValidParamError
+
 # noinspection PyBroadException
 try:
     # noinspection PyUnresolvedReferences
-    from pure25519 import ed25519_oop as ed25519
-except ImportError:
     import ed25519
+except ImportError:
+    from pure25519 import ed25519_oop as ed25519
+
 import hashlib
+
+
+def _get_key_of_expected_type(key, expected_type):
+    if key is not None and not isinstance(key, expected_type):
+        raise NotValidParamError("The given key_type={}) is not of type {}.".format(type(key), expected_type))
+    return key
 
 
 class Keypair(object):
@@ -36,12 +45,10 @@ class Keypair(object):
     """
 
     def __init__(self, verifying_key, signing_key=None):
-        # FIXME: Throw more specific exceptions instead of assert statements.
-        assert type(verifying_key) is ed25519.VerifyingKey
-        self.verifying_key = verifying_key
-        if signing_key is not None:
-            assert type(signing_key) is ed25519.SigningKey
-            self.signing_key = signing_key
+        self.verifying_key = _get_key_of_expected_type(verifying_key,
+                                                       ed25519.VerifyingKey)
+        self.signing_key = _get_key_of_expected_type(signing_key,
+                                                     ed25519.SigningKey)
 
     @classmethod
     def deterministic(cls, mnemonic, passphrase='', lang='english', index=0):
@@ -61,8 +68,8 @@ class Keypair(object):
             This allows for multiple Keypairs to be derived from the same
             mnemonic, such as::
 
-                >>> from stellar_base import Keypair
-                >>> m = 'hello world'  # Don't use this mnemonic in practice.
+                >>> from stellar_base.keypair import Keypair
+                >>> m = 'update hello cry airport drive chunk elite boat shaft sea describe number'  # Don't use this mnemonic in practice.
                 >>> kp1 = Keypair.deterministic(m, lang='english', index=0)
                 >>> kp2 = Keypair.deterministic(m, lang='english', index=1)
                 >>> kp3 = Keypair.deterministic(m, lang='english', index=2)
@@ -89,7 +96,8 @@ class Keypair(object):
         :return: A new :class:`Keypair` instance derived by the secret seed.
 
         """
-        raw_seed = decode_check("seed", seed)
+
+        raw_seed = is_valid_secret_key(seed)
         return cls.from_raw_seed(raw_seed)
 
     @classmethod
@@ -137,15 +145,12 @@ class Keypair(object):
         :return: A new :class:`Keypair` with only a verifying (public) key.
 
         """
-        public_key = decode_check("account", address)
-        if len(public_key) != 32:
-            raise XdrLengthError('Invalid Stellar address')
+        public_key = is_valid_address(address)
         verifying_key = ed25519.VerifyingKey(public_key)
         return cls(verifying_key)
 
     # TODO: Make some of the following functions properties?
 
-    # TODO: Make this function private, given its use in xdr(self).
     def account_xdr_object(self):
         """Create PublicKey XDR object via public key bytes.
 
@@ -158,7 +163,7 @@ class Keypair(object):
         """Generate base64 encoded XDR PublicKey object.
 
         Return a base64 encoded PublicKey XDR object, for sending over the wire
-        when interacting with stellard.
+        when interacting with stellar.
 
         :return: The base64 encoded PublicKey XDR structure.
         """
@@ -193,7 +198,7 @@ class Keypair(object):
         process.
 
         :return: The public key encoded as a strkey.
-        :rtype: str
+        :rtype: bytes
         """
         return encode_check('account', self.raw_public_key())
 
@@ -204,7 +209,7 @@ class Keypair(object):
         process.
 
         :return: The secret seed encoded as a strkey.
-        :rtype: str
+        :rtype: bytes
         """
         return encode_check('seed', self.raw_seed())
 
@@ -215,11 +220,10 @@ class Keypair(object):
         :return: The signed data
         :rtype: bytes
         """
-        # FIXME: Refactor this method into more robust exception handling.
-        try:
-            return self.signing_key.sign(data)
-        except:
-            raise Exception("cannot sign: no secret key available")
+        if self.signing_key is None:
+            raise MissingSigningKeyError("KeyPair does not contain secret key. "
+                                         "Use Keypair.from_seed method to create a new keypair with a secret key.")
+        return self.signing_key.sign(data)
 
     def verify(self, data, signature):
         """Verify the signature of a sequence of bytes.
@@ -232,13 +236,11 @@ class Keypair(object):
             the private key associated with this verifying key.
         :param bytes signature: A sequence of bytes that comprised the
             signature for the corresponding data.
-        :return: True if the verification passed, False otherwise.
         """
         try:
-            self.verifying_key.verify(signature, data)
-            return True
-        except:
-            return False
+            return self.verifying_key.verify(signature, data)
+        except ed25519.BadSignatureError:
+            raise BadSignatureError("Signature verification failed.")
 
     def sign_decorated(self, data):
         """Sign a bytes-like object and return the decorated signature.

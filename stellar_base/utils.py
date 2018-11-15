@@ -1,6 +1,6 @@
 # coding: utf-8
 from __future__ import print_function
-
+import sys
 import base64
 import binascii
 from decimal import Decimal, ROUND_FLOOR
@@ -11,18 +11,21 @@ import io
 import os
 import struct
 
-import crc16
 from mnemonic import Mnemonic
-import numpy as np
 from pbkdf2 import PBKDF2
 
+try:
+    from crc16 import crc16xmodem
+except ImportError:
+    # see: https://github.com/StellarCN/py-stellar-base/issues/160
+    from .purecrc16 import crc16xmodem
+
 from .stellarxdr import Xdr
-from .exceptions import DecodeError, ConfigurationError, MnemonicError
+from .exceptions import DecodeError, ConfigurationError, MnemonicError, StellarAddressInvalidError, \
+    StellarSecretInvalidError, NotValidParamError, NoApproximationError
 
 # Compatibility for Python 3.x that don't have unicode type
-try:
-    type(unicode)
-except NameError:
+if sys.version_info.major == 3:
     unicode = str
 
 bytes_types = (bytes, bytearray)  # Types acceptable as binary data
@@ -45,15 +48,15 @@ def xdr_hash(data):
 
 
 def account_xdr_object(account):
-    public_key = decode_check('account', account)
+    public_key = is_valid_address(account)
     axo = Xdr.types.PublicKey(Xdr.const.KEY_TYPE_ED25519, public_key)
     return axo
 
 
 def signer_key_xdr_object(signer_type, signer):
     if signer_type == 'ed25519PublicKey':
-        return Xdr.types.SignerKey(
-            Xdr.const.SIGNER_KEY_TYPE_ED25519, decode_check('account', signer))
+        return Xdr.types.SignerKey(Xdr.const.SIGNER_KEY_TYPE_ED25519,
+                                   is_valid_address(signer))
     if signer_type == 'hashX':
         return Xdr.types.SignerKey(
             Xdr.const.SIGNER_KEY_TYPE_HASH_X, hashX=signer)
@@ -63,7 +66,7 @@ def signer_key_xdr_object(signer_type, signer):
 
 
 def hashX_sign_decorated(preimage):
-    preimage = preimage.encode('utf-8')
+    # preimage -> bytes_here
     hash_preimage = hashlib.sha256(preimage).digest()
     hint = hash_preimage[-4:]
     return Xdr.types.DecoratedSignature(hint, preimage)
@@ -76,16 +79,17 @@ def bytes_from_decode_data(s):
         try:
             return s.encode('ascii')
         except UnicodeEncodeError:
-            raise ValueError(
+            raise NotValidParamError(
                 'String argument should contain only ASCII characters')
     if isinstance(s, bytes_types):
         return s
     try:
         return memoryview(s).tobytes()
     except TypeError:
-        raise suppress_context(TypeError(
-            'Argument should be a bytes-like object or ASCII string, not '
-            '{!r}'.format(s.__class__.__name__)))
+        raise suppress_context(
+            TypeError(
+                'Argument should be a bytes-like object or ASCII string, not '
+                '{!r}'.format(s.__class__.__name__)))
 
 
 def decode_check(version_byte_name, encoded):
@@ -94,10 +98,10 @@ def decode_check(version_byte_name, encoded):
     try:
         decoded = base64.b32decode(encoded)
     except binascii.Error:
-        raise DecodeError('Incorrect padding')
+        raise DecodeError('Incorrect padding.')
 
     if encoded != base64.b32encode(decoded):
-        raise DecodeError('invalid encoded bytes')
+        raise DecodeError('Invalid encoded bytes.')
 
     version_byte = decoded[0:1]
     payload = decoded[0:-2]
@@ -107,20 +111,19 @@ def decode_check(version_byte_name, encoded):
     # raise KeyError
     expected_version = versionBytes[version_byte_name]
     if version_byte != expected_version:
-        raise DecodeError(
-            'Invalid version byte. Expected {}, got {}'.format(
-                str(expected_version), str(version_byte)))
+        raise DecodeError('Invalid version byte. Expected {}, got {}'.format(
+            str(expected_version), str(version_byte)))
 
     expected_checksum = calculate_checksum(payload)
     if expected_checksum != checksum:
-        raise DecodeError('invalid checksum')
+        raise DecodeError('Invalid checksum')
 
     return data
 
 
 def encode_check(version_byte_name, data):
     if data is None:
-        raise Exception("cannot encode null data")
+        raise NotValidParamError("cannot encode null data")
 
     # raise KerError
     version_byte = versionBytes[version_byte_name]
@@ -131,7 +134,7 @@ def encode_check(version_byte_name, data):
 
 def calculate_checksum(payload):
     # This code calculates CRC16-XModem checksum of payload
-    checksum = crc16.crc16xmodem(payload)
+    checksum = crc16xmodem(payload)
     # Ensure that the checksum is in LSB order.
     checksum = struct.pack('<H', checksum)
     return checksum
@@ -142,8 +145,7 @@ def best_rational_approximation(x):
     INT32_MAX = Decimal(2147483647)
     a = None
     f = None
-    fractions = np.array(
-        [[Decimal(0), Decimal(1)], [Decimal(1), Decimal(0)]])
+    fractions = [[Decimal(0), Decimal(1)], [Decimal(1), Decimal(0)]]
     i = 2
     while True:
         if x > INT32_MAX:
@@ -154,7 +156,7 @@ def best_rational_approximation(x):
         k = a * fractions[i - 1][1] + fractions[i - 2][1]
         if h > INT32_MAX or k > INT32_MAX:
             break
-        fractions = np.vstack([fractions, [h, k]])
+        fractions.append([h, k])
         if f.is_zero():
             break
         x = 1 / f
@@ -162,7 +164,7 @@ def best_rational_approximation(x):
     n = fractions[len(fractions) - 1][0]
     d = fractions[len(fractions) - 1][1]
     if n.is_zero() or d.is_zero():
-        raise Exception("Couldn't find approximation")
+        raise NoApproximationError("Couldn't find approximation.")
     return {'n': int(n), 'd': int(d)}
 
 
@@ -181,11 +183,10 @@ class StellarMnemonic(Mnemonic):
         self.stellar_account_path_format = "m/44'/148'/%d'"
         self.first_hardened_index = 0x80000000
         self.seed_modifier = b"ed25519 seed"
-        if language == 'chinese':
-            lang_filename = '{}/{}.txt'.format(self._get_directory(), language)
-        else:
-            lang_filename = '{}/{}.txt'.format(
-                Mnemonic._get_directory(), language)
+        lang_dir = Mnemonic._get_directory() \
+            if language in Mnemonic.list_languages() \
+            else self._get_directory()
+        lang_filename = os.path.join(lang_dir, language + ".txt")
         with io.open(lang_filename, 'r', encoding="utf8") as f:
             self.wordlist = [w.strip() for w in f.readlines()]
 
@@ -208,24 +209,26 @@ class StellarMnemonic(Mnemonic):
             ]
         return lang
 
-    def to_seed(cls, mnemonic, passphrase='', index=0):
-        if not cls.check(mnemonic):
-            raise MnemonicError('wrong mnemonic string')
-        mnemonic = cls.normalize_string(mnemonic)
-        passphrase = cls.normalize_string(passphrase)
+    def to_seed(self, mnemonic, passphrase='', index=0):
+        if not self.check(mnemonic):
+            raise MnemonicError('Wrong mnemonic string.')
+        mnemonic = self.normalize_string(mnemonic)
+        passphrase = self.normalize_string(passphrase)
         seed = PBKDF2(
-            mnemonic, u'mnemonic' + passphrase, iterations=PBKDF2_ROUNDS,
-            macmodule=hmac, digestmodule=hashlib.sha512).read(64)
-        return cls.derive(seed, index)
+            mnemonic,
+            u'mnemonic' + passphrase,
+            iterations=PBKDF2_ROUNDS,
+            macmodule=hmac,
+            digestmodule=hashlib.sha512).read(64)
+        return self.derive(seed, index)
 
     def generate(self, strength=128):
-        if strength not in [128, 160, 192, 224, 256]:
-            raise ValueError(
-                'Strength should be one of the following '
-                '{128, 160, 192, 224, 256}, but it was {} '
-                'instead.'.format(strength))
+        accepted_strengths = {128, 160, 192, 224, 256}
+        if strength not in accepted_strengths:
+            raise NotValidParamError('Strength should be one of the following '
+                                     '{}, but it was {} instead'
+                                     '.'.format(accepted_strengths, strength))
         ret = self.to_mnemonic(os.urandom(strength // 8))
-        # print(ret)
         return ret
 
     def derive(self, seed, index):
@@ -236,12 +239,37 @@ class StellarMnemonic(Mnemonic):
         ir = master_hmac.digest()[32:]
         path = self.stellar_account_path_format % index
         for x in path.split("/")[1:]:
-            data = (
-                struct.pack('x')
-                + il
-                + struct.pack('>I', self.first_hardened_index + int(x[:-1])))
+            data = (struct.pack('x') + il +
+                    struct.pack('>I', self.first_hardened_index + int(x[:-1])))
             i = hmac.new(ir, digestmod=hashlib.sha512)
             i.update(data)
             il = i.digest()[:32]
             ir = i.digest()[32:]
         return il
+
+
+def is_valid_address(address):
+    try:
+        return decode_check('account', address)
+    except DecodeError:
+        raise StellarAddressInvalidError('Invalid Stellar Address: {}'.format(address))
+
+
+def is_valid_secret_key(secret):
+    try:
+        return decode_check('seed', secret)
+    except DecodeError:
+        raise StellarSecretInvalidError('Invalid Stellar Secret: {}'.format(secret))
+
+
+def convert_hex_to_bytes(value):
+    # Not perfect but works on Python2 and Python3
+    if len is None:
+        raise NotValidParamError("Value should be 32 byte hash or hex encoded string, but got `None`")
+    length = len(value)
+    if length == 32:
+        return value
+    elif length == 64:
+        return binascii.unhexlify(value)
+    else:
+        raise NotValidParamError("Value should be 32 byte hash or hex encoded string, but got {}".format(value))

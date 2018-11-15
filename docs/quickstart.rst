@@ -57,15 +57,15 @@ your secret phrase:
 
 .. code-block:: python
 
-   kp = Keypair.deterministic(m, lang='chinese')
+   kp = Keypair.deterministic(secret_phrase, lang='chinese')
 
 You can even create multiple key pairs from the same phrase, using a different
 index with each call. For example:
 
 .. code-block:: python
 
-   kp1 = Keypair.deterministic(m, lang='chinese', index=1)
-   kp2 = Keypair.deterministic(m, lang='chinese', index=2)
+   kp1 = Keypair.deterministic(secret_phrase, lang='chinese', index=1)
+   kp2 = Keypair.deterministic(secret_phrase, lang='chinese', index=2)
 
 From the generated :class:`Keypair <stellar_base.keypair.Keypair>` object, you
 can easily access your public and private key.
@@ -146,7 +146,6 @@ account of your own, here's an example of how to do so:
 .. code-block:: python
 
    from stellar_base.keypair import Keypair
-   from stellar_base.asset import Asset
    from stellar_base.operation import CreateAccount, Payment
    from stellar_base.transaction import Transaction
    from stellar_base.transaction_envelope import TransactionEnvelope as Te
@@ -161,20 +160,20 @@ account of your own, here's an example of how to do so:
    # new account in the create account operation. You'll need the seed in order
    # to sign off on the transaction. This is the source account.
    old_account_seed = "SCVLSUGYEAUC4MVWJORB63JBMY2CEX6ATTJ5MXTENGD3IELUQF4F6HUB"
-   old_account_keypair = Keypair.from_seed(oldAccountSeed)
+   old_account_keypair = Keypair.from_seed(old_account_seed)
 
    # This is the new account ID (the StrKey representation of your newly
    # created public key). This is the destination account.
-   new_account_addr = "GXXX"
+   new_account_addr = "GABRGTDZEDCQ5W663U2EI5KWRSU3EAWJCSI57H7XAMUO5BQRIGNNZGTY"
 
    amount = '1' # Your new account minimum balance (in XLM) to transfer over
    # create the CreateAccount operation
-   op = CreateAccount({
-       'destination': new_account_addr,
-       'starting_balance': amount
-   })
+   op = CreateAccount(
+       destination=new_account_addr,
+       starting_balance=amount
+   )
    # create a memo
-   memo = TextMemo('Transferring to my new account!')
+   memo = TextMemo('Hello, StellarCN!')
 
    # Get the current sequence of the source account by contacting Horizon. You
    # should also check the response for errors!
@@ -187,16 +186,14 @@ account of your own, here's an example of how to do so:
    # default fee of 100 stroops as of this writing (0.00001 XLM)
    tx = Transaction(
        source=old_account_keypair.address().decode(),
-       opts={
-           'sequence': sequence,
-           'memo': memo,
-           'operations': [
-               op,
-           ],
-       },
+       sequence=sequence,
+       memo=memo,
+       operations=[
+           op,
+       ],
    )
    # Build a transaction envelope, ready to be signed.
-   envelope = Te(tx=tx, opts={"network_id": "PUBLIC"})
+   envelope = Te(tx=tx, network_id="PUBLIC")
 
    # Sign the transaction envelope with the source keypair
    envelope.sign(old_account_keypair)
@@ -237,11 +234,11 @@ Like so:
 
 .. code-block:: python
 
-   print("Balances: {}'.format(address.balances))
-   print("Sequence Number: {}'.format(address.sequence))
-   print("Flags: {}'.format(address.flags))
-   print("Signers: {}'.format(address.signers))
-   print("Data: {}'.format(address.data))
+   print('Balances: {}'.format(address.balances))
+   print('Sequence Number: {}'.format(address.sequence))
+   print('Flags: {}'.format(address.flags))
+   print('Signers: {}'.format(address.signers))
+   print('Data: {}'.format(address.data))
 
 
 Most Recent Payments
@@ -270,7 +267,7 @@ signature.
 
 .. code-block:: python
 
-   address.payments(sse=True, limit=100)
+   address.payments(sse=True)
 
 Other Account Attributes
 ------------------------
@@ -311,7 +308,7 @@ way:
    builder = Builder(secret=seed)
    # builder = Builder(secret=seed, network='public') for LIVENET
 
-   bob_address = 'GXXX'
+   bob_address = 'GABRGTDZEDCQ5W663U2EI5KWRSU3EAWJCSI57H7XAMUO5BQRIGNNZGTY'
    builder.append_payment_op(bob_address, '100', 'XLM')
    builder.add_text_memo('For beers') # string length <= 28 bytes
    builder.sign()
@@ -343,7 +340,7 @@ this, you use :meth:`import_from_xdr
 .. code-block:: python
 
    # This is the transaction that you need to add your signature to
-   xdr_string = 'GXXX'
+   xdr_string = 'AAAAAAMTTHkgxQ7b3t00RHVWjKmyAskUkd+f9wMo7oYRQZrcAAAAZAAAAIHlSBzvAAAAAAAAAAAAAAABAAAAAAAAAAoAAAAFaGVsbG8AAAAAAAABAAAAB3N0ZWxsYXIAAAAAAAAAAAA='
    builder = Builder(secret=seed)
    builder.import_from_xdr(xdr_string)
    builder.sign()
@@ -388,13 +385,13 @@ In this example, Alice is sending Bob 100 CNY.
    # create op
    amount = '100'
    asset = Asset('CNY', CNY_ISSUER)
-   op = Payment({
+   op = Payment(
        # Source is also inferred from the transaction source, so it's optional.
-       'source' : alice_kp.address().decode(),
-       'destination': bob_address,
-       'asset': asset,
-       'amount': amount
-   })
+       source=alice_kp.address().decode(),
+       destination=bob_address,
+       asset=asset,
+       amount=amount
+   )
    # create a memo
    msg = TextMemo('For beers yesterday!')
 
@@ -406,21 +403,20 @@ In this example, Alice is sending Bob 100 CNY.
 
    # Construct a transaction
    tx = Transaction(
-       source = alice_kp.address().decode(),
-       opts = {
-           'sequence': sequence,
-           'memo': msg,
-           # Can specify a fee or use the default by not specifying it
-           'fee': 100,
-           'operations': [
-               op,
-           ],
-       },
+       source=alice_kp.address().decode(),
+       sequence=sequence,
+       # time_bounds = {'minTime': 1531000000, 'maxTime': 1531234600},
+       memo=msg,
+       fee=100, # Can specify a fee or use the default by not specifying it
+       operations=[
+           op,
+       ],
    )
 
 
+
    # Build transaction envelope
-   envelope = Te(tx=tx, opts={"network_id": "TESTNET"}) # or 'PUBLIC'
+   envelope = Te(tx=tx, network_id="TESTNET") # or 'PUBLIC'
 
    # Sign the envelope
    envelope.sign(alice_kp)

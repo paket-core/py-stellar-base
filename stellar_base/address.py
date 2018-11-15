@@ -1,10 +1,7 @@
 # coding: utf-8
 
-import requests
-
 from .horizon import Horizon
 from .keypair import Keypair
-from .exceptions import AccountNotExistError, NotValidParamError
 from .horizon import HORIZON_LIVE, HORIZON_TEST
 
 
@@ -23,34 +20,33 @@ class Address(object):
     :param str secret: The secret seed string that is used to derive the
         address for this :class:`Address`.
     :param str network: The network to connect to for verifying and retrieving
-        additional attributes from. Must be either 'PUBLIC' or 'TESTNET'.
-    :param Horizon horizon: The :class:`Horizon` instance to use for
+        additional attributes from. 'PUBLIC' is an alias for 'Public Global Stellar Network ; September 2015',
+        'TESTNET' is an alias for 'Test SDF Network ; September 2015'. Defaults to TESTNET.
+    :param str horizon_uri: The horizon url to use for
         connecting to for additional information for the account to which this
         address corresponds to.
-
     """
 
     # TODO: Make network an enum
-    def __init__(
-            self, address=None, secret=None, network='TESTNET', horizon=None):
-        if address is None and secret is None:
-            # FIXME: Throw a better exception
-            raise Exception('oops,need a stellar address or secret')
-        if address is None and secret is not None:
+    def __init__(self,
+                 address=None,
+                 secret=None,
+                 network='TESTNET',
+                 horizon_uri=None):
+        if secret:
             self.address = Keypair.from_seed(secret).address().decode()
+        elif address:
+            self.address = Keypair.from_address(address).address().decode()
         else:
-            self.address = address
-        self.secret = secret
+            raise ValueError('oops, need a stellar address or secret')
 
         if network.upper() != 'PUBLIC':
             self.network = 'TESTNET'
         else:
             self.network = 'PUBLIC'
-        if horizon:
-            if isinstance(horizon, Horizon):
-                self.horizon = horizon
-            else:
-                self.horizon = Horizon(horizon)
+
+        if horizon_uri:
+            self.horizon = Horizon(horizon_uri)
         elif network.upper() == 'PUBLIC':
             self.horizon = Horizon(HORIZON_LIVE)
         else:
@@ -63,6 +59,8 @@ class Address(object):
         self.flags = None
         self.signers = None
         self.data = None
+        self.inflation_destination = None
+        self.subentry_count = None
 
     def get(self):
         """Retrieve the account data that corresponds to this :class:`Address`.
@@ -78,106 +76,116 @@ class Address(object):
         * Flags
         * Signers
         * Data
-
-        :raises AccountNotExistError: If the account does not exist, shown by a
-            404 response from a Horizon server.
-        :raises Exception: If any other problems come up, or if a network
-            connection happens.
+        * Inflation Destination
+        * Subentry Count
 
         """
-        try:
-            acc = self.horizon.account(self.address)
-            if acc.get('sequence'):
-                self.sequence = acc.get('sequence')
-                self.balances = acc.get('balances')
-                self.paging_token = acc.get('paging_token')
-                self.thresholds = acc.get('thresholds')
-                self.flags = acc.get('flags')
-                self.signers = acc.get('signers')
-                self.data = acc.get('data')
-            elif acc.get('status') == 404:
-                raise AccountNotExistError(acc.get('title'))
-            else:
-                # FIXME: Throw a more specific exception.
-                raise Exception(acc.get('detail'))
-        except requests.ConnectionError:
-            raise Exception('network problem')
 
-    def payments(self, sse=False, **kwargs):
+        acc = self.horizon.account(self.address)
+        self.sequence = acc.get('sequence')
+        self.balances = acc.get('balances')
+        self.paging_token = acc.get('paging_token')
+        self.thresholds = acc.get('thresholds')
+        self.flags = acc.get('flags')
+        self.signers = acc.get('signers')
+        self.data = acc.get('data')
+        self.inflation_destination = acc.get('inflation_destination')
+        self.subentry_count = acc.get('subentry_count')
+
+    def payments(self, cursor=None, order='asc', limit=10, sse=False):
         """Retrieve the payments JSON from this instance's Horizon server.
 
         Retrieve the payments JSON response for the account associated with
         this :class:`Address`.
 
-        :param bool sse: Use the SSE client for connecting to Horizon.
+        :param cursor: A paging token, specifying where to start returning records from.
+            When streaming this can be set to "now" to stream object created since your request time.
+        :type cursor: int, str
+        :param str order: The order in which to return rows, "asc" or "desc".
+        :param int limit: Maximum number of records to return.
+        :param bool sse: Use server side events for streaming responses.
 
         """
-        check_params(kwargs)
-        return self.horizon.account_payments(
-            self.address, params=kwargs, sse=sse)
+        return self.horizon.account_payments(address=self.address, cursor=cursor, order=order, limit=limit, sse=sse)
 
-    def offers(self, **kwargs):
+    def offers(self, cursor=None, order='asc', limit=10, sse=False):
         """Retrieve the offers JSON from this instance's Horizon server.
 
         Retrieve the offers JSON response for the account associated with
         this :class:`Address`.
 
-        :param bool sse: Use the SSE client for connecting to Horizon.
+        :param cursor: A paging token, specifying where to start returning records from.
+            When streaming this can be set to "now" to stream object created since your request time.
+        :type cursor: int, str
+        :param str order: The order in which to return rows, "asc" or "desc".
+        :param int limit: Maximum number of records to return.
+        :param bool sse: Use server side events for streaming responses.
 
         """
-        check_params(kwargs)
-        return self.horizon.account_offers(self.address, params=kwargs)
+        return self.horizon.account_offers(self.address, cursor=cursor, order=order, limit=limit, sse=sse)
 
-    def transactions(self, sse=False, **kwargs):
+    def transactions(self, cursor=None, order='asc', limit=10, sse=False):
         """Retrieve the transactions JSON from this instance's Horizon server.
 
         Retrieve the transactions JSON response for the account associated with
         this :class:`Address`.
 
-        :param bool sse: Use the SSE client for connecting to Horizon.
-
+        :param cursor: A paging token, specifying where to start returning records from.
+            When streaming this can be set to "now" to stream object created since your request time.
+        :type cursor: int, str
+        :param str order: The order in which to return rows, "asc" or "desc".
+        :param int limit: Maximum number of records to return.
+        :param bool sse: Use server side events for streaming responses.
         """
-        check_params(kwargs)
         return self.horizon.account_transactions(
-            self.address, params=kwargs, sse=sse)
+            self.address, cursor=cursor, order=order, limit=limit, sse=sse)
 
-    def operations(self, sse=False, **kwargs):
+    def operations(self, cursor=None, order='asc', limit=10, sse=False):
         """Retrieve the operations JSON from this instance's Horizon server.
 
         Retrieve the operations JSON response for the account associated with
         this :class:`Address`.
 
+        :param cursor: A paging token, specifying where to start returning records from.
+            When streaming this can be set to "now" to stream object created since your request time.
+        :type cursor: int, str
+        :param str order: The order in which to return rows, "asc" or "desc".
+        :param int limit: Maximum number of records to return.
         :param bool sse: Use the SSE client for connecting to Horizon.
 
         """
-        check_params(kwargs)
         return self.horizon.account_operations(
-            self.address, params=kwargs, sse=sse)
+            self.address, cursor=cursor, order=order, limit=limit, sse=sse)
 
-    def effects(self, sse=False, **kwargs):
+    def trades(self, cursor=None, order='asc', limit=10, sse=False):
+        """Retrieve the trades JSON from this instance's Horizon server.
+
+        Retrieve the trades JSON response for the account associated with
+        this :class:`Address`.
+
+        :param cursor: A paging token, specifying where to start returning records from.
+            When streaming this can be set to "now" to stream object created since your request time.
+        :type cursor: int, str
+        :param str order: The order in which to return rows, "asc" or "desc".
+        :param int limit: Maximum number of records to return.
+        :param bool sse: Use the SSE client for connecting to Horizon.
+        """
+        return self.horizon.account_trades(
+            self.address, cursor=cursor, order=order, limit=limit, sse=sse)
+
+    def effects(self, cursor=None, order='asc', limit=10, sse=False):
         """Retrieve the effects JSON from this instance's Horizon server.
 
         Retrieve the effects JSON response for the account associated with
         this :class:`Address`.
 
+        :param cursor: A paging token, specifying where to start returning records from.
+            When streaming this can be set to "now" to stream object created since your request time.
+        :type cursor: int, str
+        :param str order: The order in which to return rows, "asc" or "desc".
+        :param int limit: Maximum number of records to return.
         :param bool sse: Use the SSE client for connecting to Horizon.
 
         """
-        check_params(kwargs)
         return self.horizon.account_effects(
-            self.address, params=kwargs, sse=sse)
-
-
-# TODO: Make this a private method of the Address class.
-def check_params(data):
-    """Check for appropriate keywords for a Horizon request method.
-
-    Check a dict of arguments to make sure that they only contain allowable
-    params for requests to Horizon, such as 'cursor', 'limit', and 'order'.
-
-    """
-
-    params_allowed = {'cursor', 'limit', 'order'}
-    params = set(data.keys())
-    if params - params_allowed:
-        raise NotValidParamError('not valid params')
+            self.address, cursor=cursor, order=order, limit=limit, sse=sse)

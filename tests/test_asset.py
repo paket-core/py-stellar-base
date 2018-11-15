@@ -1,18 +1,21 @@
 # coding: utf-8
-
+from unittest import TestCase
 import pytest
 
 from stellar_base.asset import Asset
 from stellar_base.stellarxdr import Xdr
 
 
-class TestAsset:
-    source = 'GDJVFDG5OCW5PYWHB64MGTHGFF57DRRJEDUEFDEL2SLNIOONHYJWHA3Z'
-    cny = Asset('CNY', source)
+class TestAsset(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (
+            'GDJVFDG5OCW5PYWHB64MGTHGFF57DRRJEDUEFDEL2SLNIOONHYJWHA3Z')
+        cls.cny = Asset('CNY', cls.source)
 
     def test_native(self):
         assert 'XLM' == Asset.native().code
-        assert None == Asset.native().issuer
+        assert Asset.native().issuer is None
         assert 'native' == Asset.native().type
 
     def test_is_native(self):
@@ -28,7 +31,7 @@ class TestAsset:
             Asset('123456789012TooLong', self.source)
 
     def test_no_issuer(self):
-        with pytest.raises(Exception, match='Issuer cannot be None'):
+        with pytest.raises(Exception, match='Issuer cannot be `None` except native asset.'):
             Asset('beer', None)
 
     def test_xdr(self):
@@ -39,3 +42,12 @@ class TestAsset:
         xdr = self.cny.xdr()
         cny_x = Asset.from_xdr(xdr)
         assert self.cny == cny_x
+
+    def test_asset_to_dict(self):
+        native = Asset('XLM')
+        assert native.to_dict() == {'code': 'XLM', 'type': 'native'}
+        assert self.cny.to_dict() == {
+            'code': 'CNY',
+            'issuer': self.source,
+            'type': 'credit_alphanum4'
+        }

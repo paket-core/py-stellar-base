@@ -3,19 +3,54 @@ class StellarError(Exception):
         super(StellarError, self).__init__(msg)
 
 
+class BadSignatureError(StellarError):
+    pass
+
+
+class AssetCodeInvalidError(StellarError):
+    pass
+
+
+class StellarAddressInvalidError(StellarError):
+    pass
+
+
+class StellarSecretInvalidError(StellarError):
+    pass
+
+
+class NoStellarSecretOrAddressError(StellarError):
+    pass
+
+
+class SequenceError(StellarError):
+    pass
+
+
 class ConfigurationError(StellarError):
     pass
 
 
+class NoApproximationError(StellarError):
+    pass
+
+
 class HorizonError(StellarError):
-    pass
+    """A :exc:`HorizonError` that represents an issue stemming from
+    Stellar Horizon.
+
+    """
+    def __init__(self, msg, status_code):
+        super(HorizonError, self).__init__(msg)
+        self.message = msg
+        self.status_code = status_code
 
 
-class XdrLengthError(StellarError):
-    pass
+class HorizonRequestError(StellarError):
+    """A :exc:`HorizonRequestError` that represents we cannot connect
+    to Stellar Horizon.
 
-
-class PreimageLengthError(StellarError):
+    """
     pass
 
 
@@ -27,10 +62,6 @@ class DecodeError(StellarError):
     pass
 
 
-class AccountNotExistError(StellarError):
-    pass
-
-
 class NotValidParamError(StellarError):
     pass
 
@@ -38,3 +69,13 @@ class NotValidParamError(StellarError):
 class MnemonicError(StellarError):
     pass
 
+
+class MissingSigningKeyError(StellarError):
+    pass
+
+
+class FederationError(Exception):
+    """A :exc:`FederationError` that represents an issue stemming from
+    Stellar Federation.
+
+    """

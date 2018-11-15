@@ -3,8 +3,8 @@
 import base64
 import re
 
-from .utils import account_xdr_object, encode_check
-
+from stellar_base.exceptions import AssetCodeInvalidError, StellarAddressInvalidError
+from .utils import account_xdr_object, encode_check, is_valid_address
 from .stellarxdr import Xdr
 
 
@@ -17,8 +17,9 @@ class Asset(object):
 
     :param str code: The asset code, in the formats specified in `Stellar's
         guide on assets`_.
-    :param str issuer: The strkey encoded issuer of the asset. Note if the
+    :param issuer: The strkey encoded issuer of the asset. Note if the
         currency is the native currency (XLM (Lumens)), no issuer is necessary.
+    :type issuer: str, None
 
     .. _Stellar's guide on assets:
         https://www.stellar.org/developers/guides/concepts/assets.html
@@ -29,14 +30,17 @@ class Asset(object):
 
     def __init__(self, code, issuer=None):
         if not self._ASSET_CODE_RE.match(code):
-            raise ValueError(
-                "Asset code is invalid (alphanumeric, 12 "
-                "characters max).")
+            raise AssetCodeInvalidError("Asset code is invalid (alphanumeric, 12 "
+                                        "characters max).")
+
+        if issuer is not None:
+            try:
+                assert is_valid_address(issuer)
+            except StellarAddressInvalidError:
+                raise StellarAddressInvalidError('Invalid issuer account: {}'.format(issuer))
 
         if code.lower() != 'xlm' and issuer is None:
-            raise ValueError("Issuer cannot be None")
-
-        # TODO: Check if issuer is a valid address (public key)
+            raise StellarAddressInvalidError("Issuer cannot be `None` except native asset.")
 
         self.code = code
         self.issuer = issuer
@@ -59,13 +63,12 @@ class Asset(object):
 
         :return: A dict representing an :class:`Asset`
         """
-        # TODO: Any reason these can't be just code, issuer, and type?
-        rv = {'asset_code': self.code}
+        rv = {'code': self.code}
         if not self.is_native():
-            rv['asset_issuer'] = self.issuer
-            rv['asset_type'] = self.type
+            rv['issuer'] = self.issuer
+            rv['type'] = self.type
         else:
-            rv['asset_type'] = 'native'
+            rv['type'] = 'native'
         return rv
 
     @staticmethod
@@ -134,7 +137,8 @@ class Asset(object):
             code = asset_xdr_object.alphaNum4.assetCode.decode().rstrip('\x00')
         else:
             issuer = encode_check(
-                'account', asset_xdr_object.alphaNum12.issuer.ed25519).decode()
+                'account',
+                asset_xdr_object.alphaNum12.issuer.ed25519).decode()
             code = (
                 asset_xdr_object.alphaNum12.assetCode.decode().rstrip('\x00'))
         return cls(code, issuer)

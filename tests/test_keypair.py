@@ -1,4 +1,8 @@
+from unittest import TestCase
+from pytest import raises
+
 from stellar_base.keypair import Keypair
+from stellar_base.exceptions import MissingSigningKeyError, NotValidParamError
 
 
 def test_sep0005():
@@ -12,7 +16,8 @@ def test_sep0005():
     mnemonic = 'cable spray genius state float twenty onion head street palace net private method loan turn phrase state blanket interest dry amazing dress blast tube'
     seed = Keypair.deterministic(mnemonic, passphrase='p4ssphr4se').seed()
     assert seed == b'SAFWTGXVS7ELMNCXELFWCFZOPMHUZ5LXNBGUVRCY3FHLFPXK4QPXYP2X'
-    address = Keypair.deterministic(mnemonic, passphrase='p4ssphr4se', index=9).address().decode()
+    address = Keypair.deterministic(
+        mnemonic, passphrase='p4ssphr4se', index=9).address().decode()
     assert address == 'GBOSMFQYKWFDHJWCMCZSMGUMWCZOM4KFMXXS64INDHVCJ2A2JAABCYRR'
 
     mnemonic = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -20,3 +25,22 @@ def test_sep0005():
     assert seed == b'SBUV3MRWKNS6AYKZ6E6MOUVF2OYMON3MIUASWL3JLY5E3ISDJFELYBRZ'
     address = Keypair.deterministic(mnemonic, index=8).address().decode()
     assert address == 'GABTYCZJMCP55SS6I46SR76IHETZDLG4L37MLZRZKQDGBLS5RMP65TSX'
+
+
+class KeypairTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mnemonic = ('illness spike retreat truth genius clock brain pass '
+                        'fit cave bargain toe')
+        cls.keypair0 = Keypair.deterministic(cls.mnemonic)
+
+    def test_from_seed(self):
+        keypair = Keypair.from_seed(self.keypair0.seed())
+        assert self.keypair0.address() == keypair.address()
+
+    def test_sign_missing_signing_key_raise(self):
+        keypair = Keypair.from_address(self.keypair0.address())
+        raises(MissingSigningKeyError, keypair.sign, "")
+
+    def test_init_wrong_type_key_raise(self):
+        raises(NotValidParamError, Keypair, self.mnemonic)

@@ -1,23 +1,17 @@
 # -*- coding: utf-8 -*-
 
 import base64
+import decimal
 from decimal import Context, Decimal, Inexact
 
 from .asset import Asset
 from .stellarxdr import Xdr
-from .utils import (
-    account_xdr_object, best_rational_approximation as best_r, decode_check,
-    division, encode_check, signer_key_xdr_object)
-from .exceptions import DecodeError, XdrLengthError
+from .utils import (account_xdr_object, best_rational_approximation as best_r,
+                    division, encode_check, signer_key_xdr_object,
+                    is_valid_address, convert_hex_to_bytes)
+from .exceptions import StellarAddressInvalidError, NotValidParamError
 
 ONE = Decimal(10 ** 7)
-
-# TODO: We should really consider not taking a dictionary of opts here, and
-# instead should craft each operation's arguments to reasonable defaults and
-# expectations of required arguments. It makes documentation better, as well
-# as inspection of the method # definition. There's no reason that dictionary
-# unpacking can't be used to facilitate easy dict -> kwargs conversion on the
-# init statements.
 
 
 class Operation(object):
@@ -42,16 +36,13 @@ class Operation(object):
     The :class:`Operation` class is typically not used, but rather one of its
     subclasses is typically included in transactions.
 
-    :param dict opts: A dict of options for creating this :class:`Operation`.
-        By default, this only pulls out the source account via opts.source.
+    :param str source: The source account for the payment. Defaults to the
+        transaction's source account.
 
     """
 
-    def __init__(self, opts):
-        # FIXME: Use a better exception.
-        assert type(opts) is dict
-
-        self.source = opts.get('source')
+    def __init__(self, source=None):
+        self.source = source
         self.body = Xdr.nullclass()
 
     def __eq__(self, other):
@@ -101,13 +92,28 @@ class Operation(object):
 
         """
         if not isinstance(value, str):
-            # FIXME: Raise better exception
-            raise Exception("value must be a string")
+            raise NotValidParamError("Value of type '{}' must be of type String, but got {}".format(value, type(value)))
 
         # throw exception if value * ONE has decimal places (it can't be
         # represented as int64)
-        return int((Decimal(value) * ONE).to_integral_exact(
-            context=Context(traps=[Inexact])))
+        try:
+            amount = int((Decimal(value) * ONE).to_integral_exact(context=Context(traps=[Inexact])))
+        except decimal.Inexact:
+            raise NotValidParamError("Value of '{}' must have at most 7 digits after the decimal.".format(value))
+        except decimal.InvalidOperation:
+            raise NotValidParamError("Value of '{}' must represent a positive number.".format(value))
+        return amount
+
+    @staticmethod
+    def to_xdr_price(price):
+        if isinstance(price, dict):
+            if not ('n' in price and 'd' in price):
+                raise NotValidParamError(
+                    "You need pass `price` params as `str` or `{'n': numerator, 'd': denominator}`"
+                )
+        else:
+            price = best_r(price)
+        return price
 
     @staticmethod
     def from_xdr_amount(value):
@@ -136,6 +142,18 @@ class Operation(object):
         return str(Decimal(value) / ONE)
 
     @classmethod
+    def type_code(cls):
+        pass
+
+    @classmethod
+    def from_xdr_object(cls, operation):
+        for sub_cls in cls.__subclasses__():
+            if sub_cls.type_code() == operation.type:
+                return sub_cls.from_xdr_object(operation)
+        raise NotImplementedError("Operation of type={} is not implemented"
+                                  ".".format(operation.type))
+
+    @classmethod
     def from_xdr(cls, xdr):
         """Create the appropriate :class:`Operation` subclass from the XDR
         structure.
@@ -150,28 +168,7 @@ class Operation(object):
         xdr_decode = base64.b64decode(xdr)
         op = Xdr.StellarXDRUnpacker(xdr_decode)
         op = op.unpack_Operation()
-        if op.type == Xdr.const.CREATE_ACCOUNT:
-            return CreateAccount.from_xdr_object(op)
-        elif op.type == Xdr.const.PAYMENT:
-            return Payment.from_xdr_object(op)
-        elif op.type == Xdr.const.PATH_PAYMENT:
-            return PathPayment.from_xdr_object(op)
-        elif op.type == Xdr.const.CHANGE_TRUST:
-            return ChangeTrust.from_xdr_object(op)
-        elif op.type == Xdr.const.ALLOW_TRUST:
-            return AllowTrust.from_xdr_object(op)
-        elif op.type == Xdr.const.SET_OPTIONS:
-            return SetOptions.from_xdr_object(op)
-        elif op.type == Xdr.const.MANAGE_OFFER:
-            return ManageOffer.from_xdr_object(op)
-        elif op.type == Xdr.const.CREATE_PASSIVE_OFFER:
-            return CreatePassiveOffer.from_xdr_object(op)
-        elif op.type == Xdr.const.ACCOUNT_MERGE:
-            return AccountMerge.from_xdr_object(op)
-        elif op.type == Xdr.const.INFLATION:
-            return Inflation.from_xdr_object(op)
-        elif op.type == Xdr.const.MANAGE_DATA:
-            return ManageData.from_xdr_object(op)
+        return cls.from_xdr_object(op)
 
 
 class CreateAccount(Operation):
@@ -183,15 +180,23 @@ class CreateAccount(Operation):
 
     Threshold: Medium
 
-    :param dict opts: A dict of options for creating this
-        :class:`CreateAccount`. This class pulls a 'source', 'destination', and
-        'starting_balance' via opts.
+    :param str destination: Destination account ID to create an account for.
+    :param str starting_balance: Amount in XLM the account should be
+        funded for. Must be greater than the [reserve balance amount]
+        (https://www.stellar.org/developers/learn/concepts/fees.html).
+    :param str source: The source account for the payment. Defaults to the
+        transaction's source account.
 
     """
-    def __init__(self, opts):
-        super(CreateAccount, self).__init__(opts)
-        self.destination = opts.get('destination')
-        self.starting_balance = opts.get('starting_balance')
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.CREATE_ACCOUNT
+
+    def __init__(self, destination, starting_balance, source=None):
+        super(CreateAccount, self).__init__(source)
+        self.destination = destination
+        self.starting_balance = starting_balance
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -224,11 +229,11 @@ class CreateAccount(Operation):
         starting_balance = Operation.from_xdr_amount(
             op_xdr_object.body.createAccountOp.startingBalance)
 
-        return cls({
-            'source': source,
-            'destination': destination,
-            'starting_balance': starting_balance,
-        })
+        return cls(
+            source=source,
+            destination=destination,
+            starting_balance=starting_balance,
+        )
 
 
 class Payment(Operation):
@@ -239,16 +244,23 @@ class Payment(Operation):
 
     Threshold: Medium
 
-    :param dict opts: A dict of options for creating this :class:`Payment`.
-        This class pulls a 'source', 'destination', 'asset', and 'amount' via
-        opts.
+    :param str destination: The destination account ID.
+    :param Asset asset: The asset to send.
+    :param str amount: The amount to send.
+    :param str source: The source account for the payment. Defaults to the
+        transaction's source account.
 
     """
-    def __init__(self, opts):
-        super(Payment, self).__init__(opts)
-        self.destination = opts.get('destination')
-        self.asset = opts.get('asset')
-        self.amount = opts.get('amount')
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.PAYMENT
+
+    def __init__(self, destination, asset, amount, source=None):
+        super(Payment, self).__init__(source)
+        self.destination = destination
+        self.asset = asset
+        self.amount = amount
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -283,12 +295,12 @@ class Payment(Operation):
         asset = Asset.from_xdr_object(op_xdr_object.body.paymentOp.asset)
         amount = Operation.from_xdr_amount(op_xdr_object.body.paymentOp.amount)
 
-        return cls({
-            'source': source,
-            'destination': destination,
-            'asset': asset,
-            'amount': amount,
-        })
+        return cls(
+            source=source,
+            destination=destination,
+            asset=asset,
+            amount=amount,
+        )
 
 
 class PathPayment(Operation):
@@ -301,19 +313,35 @@ class PathPayment(Operation):
 
     Threshold: Medium
 
-    :param dict opts: A dict of options for creating this :class:`PathPayment`.
-        This class pulls a 'source', 'destination', 'send_asset', 'send_max',
-        'dest_asset', 'dest_amount', and 'path' via opts.
-
+    :param str destination: The destination account to send to.
+    :param Asset send_asset: The asset to pay with.
+    :param str send_max: The maximum amount of send_asset to send.
+    :param Asset dest_asset: The asset the destination will receive.
+    :param str dest_amount: The amount the destination receives.
+    :param list path: A list of Asset objects to use as the path.
+    :param str source: The source account for the payment. Defaults to the
+        transaction's source account.
     """
-    def __init__(self, opts):
-        super(PathPayment, self).__init__(opts)
-        self.destination = opts.get('destination')
-        self.send_asset = opts.get('send_asset')
-        self.send_max = opts.get('send_max')
-        self.dest_asset = opts.get('dest_asset')
-        self.dest_amount = opts.get('dest_amount')
-        self.path = opts.get('path')  # a list of paths/assets
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.PATH_PAYMENT
+
+    def __init__(self,
+                 destination,
+                 send_asset,
+                 send_max,
+                 dest_asset,
+                 dest_amount,
+                 path,
+                 source=None):
+        super(PathPayment, self).__init__(source)
+        self.destination = destination
+        self.send_asset = send_asset
+        self.send_max = send_max
+        self.dest_asset = dest_asset
+        self.dest_amount = dest_amount
+        self.path = path  # a list of paths/assets
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -361,15 +389,14 @@ class PathPayment(Operation):
             for x in op_xdr_object.body.pathPaymentOp.path:
                 path.append(Asset.from_xdr_object(x))
 
-        return cls({
-            'source': source,
-            'destination': destination,
-            'send_asset': send_asset,
-            'send_max': send_max,
-            'dest_asset': dest_asset,
-            'dest_amount': dest_amount,
-            'path': path
-        })
+        return cls(
+            source=source,
+            destination=destination,
+            send_asset=send_asset,
+            send_max=send_max,
+            dest_asset=dest_asset,
+            dest_amount=dest_amount,
+            path=path)
 
 
 class ChangeTrust(Operation):
@@ -382,18 +409,22 @@ class ChangeTrust(Operation):
 
     Threshold: Medium
 
-    :param dict opts: A dict of options for creating this :class:`ChangeTrust`.
-        This class pulls a 'source', 'asset', and optionally a 'limit' via
-        opts.
+    :param Asset asset: The asset for the trust line.
+    :param str limit: The limit for the asset, defaults to max int64.
+        If the limit is set to "0" it deletes the trustline.
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(ChangeTrust, self).__init__(opts)
-        self.line = opts.get('asset')
-        if opts.get('limit') is not None:
-            self.limit = opts.get('limit')
-        else:
-            self.limit = "922337203685.4775807"
+    default_limit = "922337203685.4775807"
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.CHANGE_TRUST
+
+    def __init__(self, asset, limit=None, source=None):
+        super(ChangeTrust, self).__init__(source)
+        self.line = asset
+        self.limit = limit or self.default_limit
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -424,11 +455,7 @@ class ChangeTrust(Operation):
         limit = Operation.from_xdr_amount(
             op_xdr_object.body.changeTrustOp.limit)
 
-        return cls({
-            'source': source,
-            'asset': line,
-            'limit': limit
-        })
+        return cls(source=source, asset=line, limit=limit)
 
 
 class AllowTrust(Operation):
@@ -436,7 +463,7 @@ class AllowTrust(Operation):
     on Stellar's network.
 
     Updates the authorized flag of an existing trustline. This can only be
-    called by the issuer of a trustline’s `asset
+    called by the issuer of a trustline's `asset
     <https://www.stellar.org/developers/guides/concepts/assets.html>`_.
 
     The issuer can only clear the authorized flag if the issuer has the
@@ -445,16 +472,21 @@ class AllowTrust(Operation):
 
     Threshold: Low
 
-    :param dict opts: A dict of options for creating this :class:`AllowTrust`.
-        This class pulls a 'source', 'trustor', 'asset_code', and 'authorize'
-        via opts.
+    :param str trustor: The trusting account (the one being authorized)
+    :param str asset_code: The asset code being authorized.
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(AllowTrust, self).__init__(opts)
-        self.trustor = opts.get('trustor')
-        self.asset_code = opts.get('asset_code')
-        self.authorize = opts.get('authorize')
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.ALLOW_TRUST
+
+    def __init__(self, trustor, asset_code, authorize, source=None):
+        super(AllowTrust, self).__init__(source)
+        self.trustor = trustor
+        self.asset_code = asset_code
+        self.authorize = authorize
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -505,15 +537,15 @@ class AllowTrust(Operation):
             asset_code = (
                 op_xdr_object.body.allowTrustOp.asset.assetCode12.decode())
         else:
-            # FIXME: Raise a better exception
-            raise Exception
+            raise NotImplementedError(
+                "Operation of asset_type={} is not implemented"
+                ".".format(asset_type.type))
 
-        return cls({
-            'source': source,
-            'trustor': trustor,
-            'authorize': authorize,
-            'asset_code': asset_code
-        })
+        return cls(
+            source=source,
+            trustor=trustor,
+            authorize=authorize,
+            asset_code=asset_code)
 
 
 class SetOptions(Operation):
@@ -530,61 +562,80 @@ class SetOptions(Operation):
 
     Threshold: Medium or High
 
-    :param dict opts: A dict of options for creating this :class:`SetOptions`.
-        This class pulls several of the following depending on the option: a
-        'source', 'inflation_dest', 'clear_flags', 'set_flags',
-        'master_weight', 'low_threshold', 'med_threshold', 'high_threshold',
-        'home_domain', 'signer_address', 'signer_type', 'signer_weight' via
-        opts.
+    :param str inflation_dest: Set this account ID as the account's inflation destination.
+    :param int clear_flags: Bitmap integer for which account flags to clear.
+    :param int set_flags: Bitmap integer for which account flags to set.
+    :param int master_weight: The master key weight.
+    :param int low_threshold: The sum weight for the low threshold.
+    :param int med_threshold: The sum weight for the medium threshold.
+    :param int high_threshold: The sum weight for the high threshold.
+    :param str home_domain: sets the home domain used for reverse federation lookup.
+    :param signer_address: signer
+    :type signer_address: str, bytes
+    :param str signer_type: The type of signer, it should be 'ed25519PublicKey',
+        'hashX' or 'preAuthTx'
+    :param int signer_weight: The weight of the new signer (0 to delete or 1-255)
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(SetOptions, self).__init__(opts)
-        self.inflation_dest = opts.get('inflation_dest')
-        self.clear_flags = opts.get('clear_flags')
-        self.set_flags = opts.get('set_flags')
-        self.master_weight = opts.get('master_weight')
-        self.low_threshold = opts.get('low_threshold')
-        self.med_threshold = opts.get('med_threshold')
-        self.high_threshold = opts.get('high_threshold')
-        self.home_domain = opts.get('home_domain')
 
-        self.signer_address = opts.get('signer_address')
-        self.signer_type = opts.get('signer_type')
-        self.signer_weight = opts.get('signer_weight')
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.SET_OPTIONS
 
-        # FIXME: Clean up boolean logic - make these conditions more linear
-        # (some of them depend on booleans already checked in earlier
-        # statements)
+    def __init__(self,
+                 inflation_dest=None,
+                 clear_flags=None,
+                 set_flags=None,
+                 master_weight=None,
+                 low_threshold=None,
+                 med_threshold=None,
+                 high_threshold=None,
+                 home_domain=None,
+                 signer_address=None,
+                 signer_type=None,
+                 signer_weight=None,
+                 source=None):
+        super(SetOptions, self).__init__(source)
+        self.inflation_dest = inflation_dest
+        self.clear_flags = clear_flags
+        self.set_flags = set_flags
+        self.master_weight = master_weight
+        self.low_threshold = low_threshold
+        self.med_threshold = med_threshold
+        self.high_threshold = high_threshold
+        if isinstance(home_domain, str):
+            self.home_domain = bytearray(home_domain, encoding='utf-8')
+        else:
+            self.home_domain = home_domain
+        self.signer_address = signer_address
+        self.signer_type = signer_type
+        self.signer_weight = signer_weight
+
         if self.signer_address is not None and self.signer_type is None:
             try:
-                decode_check('account', self.signer_address)
-            except DecodeError:
-                raise Exception(
-                    'Must be a valid strkey if not give signer_type')
+                is_valid_address(self.signer_address)
+            except StellarAddressInvalidError:
+                raise StellarAddressInvalidError('Must be a valid stellar address if not give signer_type')
             self.signer_type = 'ed25519PublicKey'
 
         signer_is_invalid_type = (
-            self.signer_type is not None and
-            self.signer_type not in ('ed25519PublicKey', 'hashX', 'preAuthTx'))
+                self.signer_type is not None and
+                self.signer_type not in ('ed25519PublicKey', 'hashX', 'preAuthTx'))
 
         if signer_is_invalid_type:
-            # FIXME: Throw better exception
-            raise Exception('invalid signer type.')
+            raise NotValidParamError('Invalid signer type, sign_type should '
+                                     'be ed25519PublicKey, hashX or preAuthTx')
 
-        signer_addr_has_valid_len = (
-            self.signer_address is not None and len(self.signer_address) == 32)
-
-        if (self.signer_type in ('hashX', 'preAuthTx')
-                and not signer_addr_has_valid_len):
-            # FIXME: Throw better exception
-            raise Exception('hashX or preAuthTx Signer must be 32 bytes')
+        if self.signer_type in ('hashX', 'preAuthTx'):
+            self.signer_address = convert_hex_to_bytes(self.signer_address)
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
         :class:`SetOptions`.
 
         """
+
         def assert_option_array(x):
             if x is None:
                 return []
@@ -605,14 +656,14 @@ class SetOptions(Operation):
         self.high_threshold = assert_option_array(self.high_threshold)
         self.home_domain = assert_option_array(self.home_domain)
 
-        req_signer_fields = (
-            self.signer_address, self.signer_type, self.signer_weight)
+        req_signer_fields = (self.signer_address, self.signer_type,
+                             self.signer_weight)
 
         if all(signer_field is not None for signer_field in req_signer_fields):
             signer = [
                 Xdr.types.Signer(
-                    signer_key_xdr_object(
-                        self.signer_type, self.signer_address),
+                    signer_key_xdr_object(self.signer_type,
+                                          self.signer_address),
                     self.signer_weight)
             ]
         else:
@@ -642,8 +693,8 @@ class SetOptions(Operation):
             inflation_dest = None
         else:
             inflation_dest = encode_check(
-                'account',
-                op_xdr_object.body.setOptionsOp.inflationDest[0].ed25519).decode()
+                'account', op_xdr_object.body.setOptionsOp.inflationDest[0]
+                    .ed25519).decode()
 
         clear_flags = op_xdr_object.body.setOptionsOp.clearFlags  # list
         set_flags = op_xdr_object.body.setOptionsOp.setFlags
@@ -671,20 +722,19 @@ class SetOptions(Operation):
             signer_type = None
             signer_weight = None
 
-        return cls({
-            'source': source,
-            'inflation_dest': inflation_dest,
-            'clear_flags': clear_flags,
-            'set_flags': set_flags,
-            'master_weight': master_weight,
-            'low_threshold': low_threshold,
-            'med_threshold': med_threshold,
-            'high_threshold': high_threshold,
-            'home_domain': home_domain,
-            'signer_address': signer_address,
-            'signer_type': signer_type,
-            'signer_weight': signer_weight
-        })
+        return cls(
+            source=source,
+            inflation_dest=inflation_dest,
+            clear_flags=clear_flags,
+            set_flags=set_flags,
+            master_weight=master_weight,
+            low_threshold=low_threshold,
+            med_threshold=med_threshold,
+            high_threshold=high_threshold,
+            home_domain=home_domain,
+            signer_address=signer_address,
+            signer_type=signer_type,
+            signer_weight=signer_weight)
 
 
 class ManageOffer(Operation):
@@ -702,18 +752,31 @@ class ManageOffer(Operation):
 
     Threshold: Medium
 
-    :param dict opts: A dict of options for creating this :class:`ManageOffer`.
-        This class pulls several of the following from opts: 'source',
-        'selling', 'buying', 'amount', 'price', 'offer_id'.
+    :param Asset selling: What you're selling.
+    :param Asset buying: What you're buying.
+    :param str amount: The total amount you're selling. If 0,
+        deletes the offer.
+    :param price: Price of 1 unit of `selling` in
+        terms of `buying`.
+    :type price: str, dict
+    :param int offer_id: If `0`, will create a new offer (default). Otherwise,
+        edits an existing offer.
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(ManageOffer, self).__init__(opts)
-        self.selling = opts.get('selling')  # Asset
-        self.buying = opts.get('buying')  # Asset
-        self.amount = opts.get('amount')
-        self.price = opts.get('price')
-        self.offer_id = opts.get('offer_id', 0)
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.MANAGE_OFFER
+
+    def __init__(self, selling, buying, amount, price, offer_id=0,
+                 source=None):
+        super(ManageOffer, self).__init__(source)
+        self.selling = selling  # Asset
+        self.buying = buying  # Asset
+        self.amount = amount
+        self.price = price
+        self.offer_id = offer_id
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -722,13 +785,13 @@ class ManageOffer(Operation):
         """
         selling = self.selling.to_xdr_object()
         buying = self.buying.to_xdr_object()
-        price = best_r(self.price)
+        price = Operation.to_xdr_price(self.price)
         price = Xdr.types.Price(price['n'], price['d'])
 
         amount = Operation.to_xdr_amount(self.amount)
 
-        manage_offer_op = Xdr.types.ManageOfferOp(
-            selling, buying, amount, price, self.offer_id)
+        manage_offer_op = Xdr.types.ManageOfferOp(selling, buying, amount,
+                                                  price, self.offer_id)
         self.body.type = Xdr.const.MANAGE_OFFER
         self.body.manageOfferOp = manage_offer_op
         return super(ManageOffer, self).to_xdr_object()
@@ -756,14 +819,13 @@ class ManageOffer(Operation):
         price = division(n, d)
         offer_id = op_xdr_object.body.manageOfferOp.offerID
 
-        return cls({
-            'source': source,
-            'selling': selling,
-            'buying': buying,
-            'amount': amount,
-            'price': price,
-            'offer_id': offer_id
-        })
+        return cls(
+            source=source,
+            selling=selling,
+            buying=buying,
+            amount=amount,
+            price=price,
+            offer_id=offer_id)
 
 
 class CreatePassiveOffer(Operation):
@@ -782,23 +844,33 @@ class CreatePassiveOffer(Operation):
 
     Passive offers allow market makers to have zero spread. If you want to
     trade EUR for USD at 1:1 price and USD for EUR also at 1:1, you can create
-    two passive offers so the two offers don’t immediately act on each other.
+    two passive offers so the two offers don't immediately act on each other.
 
     Once the passive offer is created, you can manage it like any other offer
     using the manage offer operation - see :class:`ManageOffer` for more
     details.
 
-    :param dict opts: A dict of options for creating this
-        :class:`CreatePassiveOffer`.  This class pulls several of the following
-        from opts: 'source', 'selling', 'buying', 'amount', 'price'.
+    :param Asset selling: What you're selling.
+    :param Asset buying: What you're buying.
+    :param str amount: The total amount you're selling. If 0,
+        deletes the offer.
+    :param price: Price of 1 unit of `selling` in
+        terms of `buying`.
+    :type price: str, dict
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(CreatePassiveOffer, self).__init__(opts)
-        self.selling = opts.get('selling')
-        self.buying = opts.get('buying')
-        self.amount = opts.get('amount')
-        self.price = opts.get('price')
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.CREATE_PASSIVE_OFFER
+
+    def __init__(self, selling, buying, amount, price, source=None):
+        super(CreatePassiveOffer, self).__init__(source)
+        self.selling = selling
+        self.buying = buying
+        self.amount = amount
+        self.price = price
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -808,10 +880,7 @@ class CreatePassiveOffer(Operation):
         selling = self.selling.to_xdr_object()
         buying = self.buying.to_xdr_object()
 
-        # FIXME: This assume that self.price is always an integer, however it
-        # could be a tuple/dict of a numerator and denominator. This should do
-        # type checking (similar to the JS library).
-        price = best_r(self.price)
+        price = Operation.to_xdr_price(self.price)
         price = Xdr.types.Price(price['n'], price['d'])
 
         amount = Operation.to_xdr_amount(self.amount)
@@ -844,13 +913,12 @@ class CreatePassiveOffer(Operation):
         n = op_xdr_object.body.createPassiveOfferOp.price.n
         d = op_xdr_object.body.createPassiveOfferOp.price.d
         price = division(n, d)
-        return cls({
-            'source': source,
-            'selling': selling,
-            'buying': buying,
-            'amount': amount,
-            'price': price
-        })
+        return cls(
+            source=source,
+            selling=selling,
+            buying=buying,
+            amount=amount,
+            price=price)
 
 
 class AccountMerge(Operation):
@@ -862,14 +930,18 @@ class AccountMerge(Operation):
 
     Threshold: High
 
-    :param dict opts: A dict of options for creating this
-        :class:`AccountMerge`.  This class pulls several of the following from
-        opts: 'source', 'destination'
+    :param str destination: Destination to merge the source account into.
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(AccountMerge, self).__init__(opts)
-        self.destination = opts.get('destination')
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.ACCOUNT_MERGE
+
+    def __init__(self, destination, source=None):
+        super(AccountMerge, self).__init__(source)
+        self.destination = destination
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -897,10 +969,7 @@ class AccountMerge(Operation):
         destination = encode_check(
             'account', op_xdr_object.body.destination.ed25519).decode()
 
-        return cls({
-            'source': source,
-            'destination': destination
-        })
+        return cls(source=source, destination=destination)
 
 
 class Inflation(Operation):
@@ -911,13 +980,16 @@ class Inflation(Operation):
 
     Threshold: Low
 
-    :param dict opts: A dict of options for creating this
-        :class:`Inflation`.  This class pulls several of the following from
-        opts: 'source'.
+    :param str source: The source account (defaults to transaction source).
 
     """
-    def __init__(self, opts):
-        super(Inflation, self).__init__(opts)
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.INFLATION
+
+    def __init__(self, source=None):
+        super(Inflation, self).__init__(source)
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -938,14 +1010,14 @@ class Inflation(Operation):
         else:
             source = encode_check(
                 'account', op_xdr_object.sourceAccount[0].ed25519).decode()
-        return cls({'source': source})
+        return cls(source=source)
 
 
 class ManageData(Operation):
     """The :class:`ManageData` object, which represents a
     ManageData operation on Stellar's network.
 
-    Allows you to set,modify or delete a Data Entry (name/value pair) that is
+    Allows you to set, modify or delete a Data Entry (name/value pair) that is
     attached to a particular account. An account can have an arbitrary amount
     of DataEntries attached to it. Each DataEntry increases the minimum balance
     needed to be held by the account.
@@ -955,23 +1027,29 @@ class ManageData(Operation):
 
     Threshold: Medium
 
-    :param dict opts: A dict of options for creating this :class:`ManageData`.
-        This class pulls several of the following from opts: 'source',
-        'data_name', 'data_value'.
+    :param str data_name: The name of the data entry.
+    :param data_value: The value of the data entry.
+    :type data_value: str, bytes, None
+    :param str source: The optional source account.
 
     """
-    def __init__(self, opts):
-        super(ManageData, self).__init__(opts)
-        self.data_name = opts.get('data_name')
-        self.data_value = opts.get('data_value')
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.MANAGE_DATA
+
+    def __init__(self, data_name, data_value, source=None):
+        super(ManageData, self).__init__(source)
+        self.data_name = data_name
+        self.data_value = data_value
 
         valid_data_name_len = len(self.data_name) <= 64
-        valid_data_val_len = (
-            self.data_value is not None and len(self.data_value) <= 64)
+        valid_data_val_len = (self.data_value is None
+                              or len(self.data_value) <= 64)
 
         if not valid_data_name_len or not valid_data_val_len:
-            raise XdrLengthError(
-                "Data or value should be <= 64 bytes (ascii encoded).")
+            raise NotValidParamError(
+                "Data and value should be <= 64 bytes (ascii encoded).")
 
     def to_xdr_object(self):
         """Creates an XDR Operation object that represents this
@@ -981,7 +1059,10 @@ class ManageData(Operation):
         data_name = bytearray(self.data_name, encoding='utf-8')
 
         if self.data_value is not None:
-            data_value = [bytearray(self.data_value, 'utf-8')]
+            if isinstance(self.data_value, bytes):
+                data_value = [bytearray(self.data_value)]
+            else:
+                data_value = [bytearray(self.data_value, 'utf-8')]
         else:
             data_value = []
         manage_data_op = Xdr.types.ManageDataOp(data_name, data_value)
@@ -1004,11 +1085,59 @@ class ManageData(Operation):
         data_name = op_xdr_object.body.manageDataOp.dataName.decode()
 
         if op_xdr_object.body.manageDataOp.dataValue:
-            data_value = op_xdr_object.body.manageDataOp.dataValue[0].decode()
+            data_value = op_xdr_object.body.manageDataOp.dataValue[0]
         else:
             data_value = None
-        return cls({
-            'source': source,
-            'data_name': data_name,
-            'data_value': data_value
-        })
+        return cls(source=source, data_name=data_name, data_value=data_value)
+
+
+class BumpSequence(Operation):
+    """The :class:`BumpSequence` object, which represents a
+    BumpSequence operation on Stellar's network.
+
+    Only available in protocol version 10 and above
+
+    Bump sequence allows to bump forward the sequence number of the source account of the
+    operation, allowing to invalidate any transactions with a smaller sequence number.
+    If the specified bumpTo sequence number is greater than the source account’s sequence number,
+    the account’s sequence number is updated with that value, otherwise it’s not modified.
+
+    Threshold: Low
+
+    :param int bump_to: Sequence number to bump to.
+    :param str source: The optional source account.
+
+    """
+
+    @classmethod
+    def type_code(cls):
+        return Xdr.const.BUMP_SEQUENCE
+
+    def __init__(self, bump_to, source=None):
+        super(BumpSequence, self).__init__(source)
+        self.bump_to = bump_to
+
+    def to_xdr_object(self):
+        """Creates an XDR Operation object that represents this
+        :class:`BumpSequence`.
+
+        """
+        bump_sequence_op = Xdr.types.BumpSequenceOp(self.bump_to)
+        self.body.type = Xdr.const.BUMP_SEQUENCE
+        self.body.bumpSequenceOp = bump_sequence_op
+        return super(BumpSequence, self).to_xdr_object()
+
+    @classmethod
+    def from_xdr_object(cls, op_xdr_object):
+        """Creates a :class:`BumpSequence` object from an XDR Operation
+        object.
+
+        """
+        if not op_xdr_object.sourceAccount:
+            source = None
+        else:
+            source = encode_check(
+                'account', op_xdr_object.sourceAccount[0].ed25519).decode()
+
+        bump_to = op_xdr_object.body.bumpSequenceOp.bumpTo
+        return cls(source=source, bump_to=bump_to)

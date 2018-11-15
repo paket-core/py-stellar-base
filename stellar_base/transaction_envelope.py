@@ -5,8 +5,8 @@ from .keypair import Keypair
 from .network import Network, NETWORKS
 from .stellarxdr import Xdr
 from .transaction import Transaction
-from .utils import hashX_sign_decorated, xdr_hash
-from .exceptions import SignatureExistError, PreimageLengthError
+from .utils import hashX_sign_decorated, xdr_hash, convert_hex_to_bytes
+from .exceptions import SignatureExistError
 
 
 class TransactionEnvelope(object):
@@ -21,25 +21,21 @@ class TransactionEnvelope(object):
 
     :param tx: The transaction that is encapsulated in this envelope.
     :type tx: :class:`Transaction <stellar_base.transaction.Transaction>`
-    :param dict opts: Additional options, such as:
-
-        - opts.signatures, which contains a list of signatures that have
+    :param list signatures: which contains a list of signatures that have
           already been created.
-        - opts.network_id, which contains the network ID for which network this
+    :param str network_id: which contains the network ID for which network this
           transaction envelope is associated with.
 
     """
-    def __init__(self, tx, opts=None):
+
+    def __init__(self, tx, signatures=None, network_id=None):
         self.tx = tx
-        try:
-            self.signatures = opts.get('signatures') or []
-        except AttributeError:
-            self.signatures = []
-        if 'network_id' in opts:
-            if opts['network_id'] in NETWORKS:
-                passphrase = NETWORKS[opts['network_id']]
+        self.signatures = signatures or []
+        if network_id:
+            if network_id in NETWORKS:
+                passphrase = NETWORKS[network_id]
             else:
-                passphrase = opts['network_id']
+                passphrase = network_id
         else:
             passphrase = NETWORKS['TESTNET']
         self.network_id = Network(passphrase).network_id()
@@ -62,7 +58,7 @@ class TransactionEnvelope(object):
         sig = keypair.sign_decorated(tx_hash)
         sig_dict = [signature.__dict__ for signature in self.signatures]
         if sig.__dict__ in sig_dict:
-            raise SignatureExistError('already signed')
+            raise SignatureExistError('The keypair has already signed')
         else:
             self.signatures.append(sig)
 
@@ -73,16 +69,18 @@ class TransactionEnvelope(object):
         <https://www.stellar.org/developers/guides/concepts/multi-sig.html>`_
         for more details on Hash(x) signatures.
 
-        :param str preimage: The "x" value to be hashed and used as a
+        :param preimage: 32 byte hash or hex encoded string, the "x" value to be hashed and used as a
             signature.
+        :type preimage: str, bytes
 
         """
-        if len(preimage) > 64:
-            raise PreimageLengthError('preimage must <= 64 bytes')
+        # if len(preimage) > 64:
+        #     raise PreimageLengthError('preimage must <= 64 bytes')
+        preimage = convert_hex_to_bytes(preimage)
         sig = hashX_sign_decorated(preimage)
         sig_dict = [signature.__dict__ for signature in self.signatures]
         if sig.__dict__ in sig_dict:
-            raise SignatureExistError('already signed')
+            raise SignatureExistError('The preimage has already signed.')
         else:
             self.signatures.append(sig)
 
@@ -139,13 +137,13 @@ class TransactionEnvelope(object):
         te = base64.b64encode(te.get_buffer())
         return te
 
-    # FIXME: can not get network id from XDR , default is 'TESTNET'
     @classmethod
     def from_xdr(cls, xdr):
         """Create a new :class:`TransactionEnvelope` from an XDR string.
 
-        :param bytes xdr: The XDR string that represents a transaction
+        :param xdr: The XDR string that represents a transaction
             envelope.
+        :type xdr: bytes, str
 
         """
         xdr_decoded = base64.b64decode(xdr)
@@ -154,7 +152,7 @@ class TransactionEnvelope(object):
         signatures = te_xdr_object.signatures
         tx_xdr_object = te_xdr_object.tx
         tx = Transaction.from_xdr_object(tx_xdr_object)
-        te = TransactionEnvelope(tx, {'signatures': signatures})
+        te = TransactionEnvelope(tx, signatures=signatures)
         # te = TransactionEnvelope(
         #     tx, {'signatures': signatures, 'network_id': 'PUBLIC'})
         return te
